@@ -1,84 +1,241 @@
-/* 
- * tcpserver.c - A multithreaded TCP echo server 
- * usage: tcpserver <port>
- * 
- * Testing : 
- * nc localhost <port> < input.txt
- */
-
 #include <iostream>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string>
 #include <cstring>
-#include <pthread.h>
+#include <sstream>
 #include <unistd.h>
+#include <pthread.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unordered_map>
-#include <vector>
+#include <queue>
 
 using namespace std;
 
-int processClientRequest(int &);
-int createServerSocket(const int &);
+// Define number of worker threads
+const int num_threads = 10;
 
-int main(int argc, char ** argv) {
-  int portno; /* port to listen on */
-  
-  /* 
-   * check command line arguments 
-   */
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <port>\n", argv[0]);
-    exit(1);
-  }
+// Queue for storing active and waiting clients
+queue<int> clients;
 
-  // DONE: Server port number taken as command line argument
-  portno = atoi(argv[1]);
+// Shared Key-value datastore
+unordered_map<string, string> KV_DATASTORE;
 
-  // DONE: Create a server socket
-  int serverSocket = createServerSocket(portno);
+// Define mutex locks for map access and queue access
+pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 
-  if (listen(serverSocket, 5) < 0)
-  {
-    cerr << "Error: Unable to listen on socket" << endl;
-    close(serverSocket);
-    return -1;
-  }
+// Condition variable for checking if queue empty
+pthread_cond_t queue_not_empty = PTHREAD_COND_INITIALIZER;
 
-  cout << "Server listening on port: " << portno << endl;
+// Handle individual client connections
+void handleConnection(int);
 
+// Thread routine
+void* startRoutine(void *);
+
+// Create and configure server socket
+int getServerSocket(const int &port);
+
+// Add new client connection to queue
+void addToQueue(int client_fd);
+
+int main(int argc, char **argv)
+{
+    int port;
+
+    /*
+     * check command line arguments
+     */
+    if (argc != 2)
+    {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+
+    // Server port number taken as command line argument
+    port = atoi(argv[1]);
+
+    // Create server socket
+    int server_fd = getServerSocket(port);
+    if (server_fd < 0)
+    {
+        cerr << "Error: Failed to start server" << endl;
+        exit(1);
+    }
+
+    // Prepare to accept connections on socket FD.
+    if (listen(server_fd, 5) < 0)
+    {
+        cerr << "Error: Couldn't listen on socket" << endl;
+        close(server_fd);
+        return -1;
+    }
+
+    cout << "Server listening on port: " << port << endl;
+
+    sockaddr_in client_addr;
+    socklen_t caddr_len = sizeof(client_addr);
+
+    vector<pthread_t> thread_ids(num_threads);
+
+    // Create worker threads
+    for(int i = 0; i < num_threads; i++) {
+        pthread_create(&thread_ids[i], NULL, &startRoutine, NULL);
+    }
+
+    while (true)
+    {
+        // Await a connection on socket FD.
+        int client_fd = accept(server_fd, (sockaddr *)(&client_addr), &caddr_len);
+        if (client_fd < 0)
+        {
+            cerr << "Error: Couldn't accept connection" << endl;
+            exit(1);
+        }
+        // Add new connection to clients queue
+        addToQueue(client_fd);
+    }
+    
+    // Destroy mutex locks
+    pthread_mutex_destroy(&map_lock);
+    pthread_mutex_destroy(&queue_lock);
+
+    // Close socket
+    close(server_fd);
+
+    return 0;
 }
 
-int createServerSocket(const int & portno) {
-  int sockfd; /* socket */
-  struct sockaddr_in serveraddr; /* server's addr */
-  
-  /* 
-   * socket: create the parent socket 
-   */
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    perror("ERROR opening socket");
-    exit(1);
-  }
-  
-  /* 
-   * build the server's Internet address 
-   */
-  bzero((char *) &serveraddr, sizeof(serveraddr));
-  serveraddr.sin_family = AF_INET;
-  serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
-  serveraddr.sin_port = htons((unsigned short)portno);
-  
-  /* 
-   * bind: associate the parent socket with a port 
-   */
-  if (bind(sockfd, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0) {
-    perror("ERROR on binding");
-    exit(1);
-  }
-  
-  return sockfd;
+int getServerSocket(const int &port)
+{
+    /* 	Creates a TCP socket and binds socket to specified
+        port.
+        Returns configured socket file descriptor.
+     */
+
+    // TCP socket Creation and Configuration
+
+    // Server socket file descriptor
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (server_fd < 0)
+    {
+        cerr << "Error: Couldn't open socket" << endl;
+        return -1;
+    }
+
+    // Structure to store configuration details
+    struct sockaddr_in server_addr;
+    socklen_t saddr_len = sizeof(server_addr);
+
+    memset(&server_addr, 0, saddr_len);
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
+
+    // Bind the socket to the address and port number
+    if (bind(server_fd, (struct sockaddr *)&server_addr, saddr_len) < 0)
+    {
+        cerr << "Error: Couldn't bind socket" << endl;
+        close(server_fd);
+        return -1;
+    }
+
+    return server_fd;
+}
+
+void addToQueue(int client_fd) {
+    /* 	Add client_fd to clients queue */
+
+    // Acquire lock before pushing client descriptor onto queue
+    pthread_mutex_lock(&queue_lock);
+    clients.push(client_fd);
+    pthread_mutex_unlock(&queue_lock);
+
+    // Unblock one thread that is blocked on the condition variable
+    pthread_cond_signal(&queue_not_empty);
+}
+
+void* startRoutine(void *) {
+    /* 	Start routine for worker threads.
+        Pops client_fd from queue and calls client handler function.
+    */
+
+    // Detach current thread from calling thread
+    pthread_detach(pthread_self());
+
+    cout << "Thread ID: " << pthread_self() << " -> Listening to queue." << endl;
+    
+    while(true) {
+        int client_fd = -1;
+
+        // Acquire queue_lock before accessing clients queue
+        pthread_mutex_lock(&queue_lock);
+
+        // Wait until clients queue is not empty
+        while (clients.empty()) {
+            // cout << "Thread ID: " << pthread_self() << " -> blocked." << endl;
+            pthread_cond_wait(&queue_not_empty, &queue_lock);
+        }
+
+        // cout << "Thread ID: " << pthread_self() << " -> unblocked." << endl;
+
+        client_fd = clients.front();
+        clients.pop();
+
+        // Release lock
+        pthread_mutex_unlock(&queue_lock);
+
+
+        // Check if client_fd is valid before handling the connection
+        if (client_fd != -1) {
+            // Call handler function for popped client
+            handleConnection(client_fd);
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
+void handleConnection(int client_fd)
+{
+    /* 	Handle Individual client connections and process
+        and respond to messages sent by the client.
+    */
+
+    // Buffer to read in messages from client
+    char buffer[1024];
+    bool end = false;
+    string response;
+    string key, value;
+
+    // cout << client_fd << " pulled from queue by " << pthread_self() << endl;
+
+    // Until client sends END message
+    while (!end)
+    {
+        memset(buffer, 0, sizeof(buffer));
+        int bytesReceived = recv(client_fd, buffer, sizeof(buffer), 0);
+        if (bytesReceived < 0)
+        {
+            cerr << "Error: Couldn't receive message" << endl;
+            exit(1);
+        }
+        else if (bytesReceived == 0)
+        {
+            cout << "Client disconnected." << endl;
+            break;
+        }
+        else
+        {
+            string query;
+            stringstream strm(buffer);
+            while (getline(strm, query))
+            {
+                // Process client query
+                // ...
+            }
+        }
+    }
+    int res = close(client_fd);
 }
