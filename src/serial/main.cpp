@@ -50,8 +50,14 @@ int main(int argc, char **argv)
             exit(1);
         }
 
-    processClientRequest(clientSocket);
+        int res = processClientRequest(clientSocket);
 
+        if (res < 0)
+        {
+            cerr << "Error: Unable to process client request" << endl;
+            exit(1);
+
+        }
     }
 
     close(serverSocket);
