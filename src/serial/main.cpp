@@ -49,12 +49,9 @@ int main(int argc, char **argv)
             cerr << "Error: Unable to accept connection" << endl;
             exit(1);
         }
-        clientSockets.push_back(clientSocket);
-    }
 
-    for (int clientSocket : clientSockets)
-    {
-        processClientRequest(clientSocket);
+    processClientRequest(clientSocket);
+
     }
 
     close(serverSocket);
