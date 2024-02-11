@@ -6,6 +6,9 @@ Build a multi-threaded server in C++, make use of PThreads for parallel programm
 
 Get started by forking this repo!
 
+### Name: Pradeep J
+### SRN: PES1UG21EC183
+
 ## Requirements
  - g++
  - GNU Make (4.2.1 or higher)

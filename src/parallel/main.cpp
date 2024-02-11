@@ -1,70 +1,51 @@
 #include <iostream>
+#include <vector>
+#include <queue>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unordered_map>
 #include <cstring>
 #include <sstream>
-#include <unistd.h>
-#include <pthread.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unordered_map>
-#include <queue>
 
 using namespace std;
 
-// Define number of worker threads
+// Constants
 const int num_threads = 10;
 
-// Queue for storing active and waiting clients
+// Global Variables
 queue<int> clients;
-
-// Shared Key-value datastore
 unordered_map<string, string> KV_DATASTORE;
-
-// Define mutex locks for map access and queue access
 pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
-
-// Condition variable for checking if queue empty
 pthread_cond_t queue_not_empty = PTHREAD_COND_INITIALIZER;
 
-// Handle individual client connections
-void handleConnection(int);
-
-// Thread routine
+// Function Declarations
+void handleConnection(int client_fd);
 void* startRoutine(void *);
-
-// Create and configure server socket
 int getServerSocket(const int &port);
-
-// Add new client connection to queue
 void addToQueue(int client_fd);
 
-int main(int argc, char **argv)
-{
-    int port;
-
-    /*
-     * check command line arguments
-     */
-    if (argc != 2)
-    {
-        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+int main(int argc, char **argv) {
+    // Command line arguments check
+    if (argc != 2) {
+        cerr << "Usage: " << argv[0] << " <port>" << endl;
         exit(1);
     }
 
-    // Server port number taken as command line argument
-    port = atoi(argv[1]);
+    // Port from command line argument
+    int port = atoi(argv[1]);
 
     // Create server socket
     int server_fd = getServerSocket(port);
-    if (server_fd < 0)
-    {
+    if (server_fd < 0) {
         cerr << "Error: Failed to start server" << endl;
         exit(1);
     }
 
-    // Prepare to accept connections on socket FD.
-    if (listen(server_fd, 5) < 0)
-    {
+    // Listen on socket
+    if (listen(server_fd, 5) < 0) {
         cerr << "Error: Couldn't listen on socket" << endl;
         close(server_fd);
         return -1;
@@ -72,29 +53,26 @@ int main(int argc, char **argv)
 
     cout << "Server listening on port: " << port << endl;
 
+    // Variables for client
     sockaddr_in client_addr;
     socklen_t caddr_len = sizeof(client_addr);
-
     vector<pthread_t> thread_ids(num_threads);
 
     // Create worker threads
-    for(int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < num_threads; i++) {
         pthread_create(&thread_ids[i], NULL, &startRoutine, NULL);
     }
 
-    while (true)
-    {
-        // Await a connection on socket FD.
+    // Accept connections
+    while (true) {
         int client_fd = accept(server_fd, (sockaddr *)(&client_addr), &caddr_len);
-        if (client_fd < 0)
-        {
+        if (client_fd < 0) {
             cerr << "Error: Couldn't accept connection" << endl;
             exit(1);
         }
-        // Add new connection to clients queue
         addToQueue(client_fd);
     }
-    
+
     // Destroy mutex locks
     pthread_mutex_destroy(&map_lock);
     pthread_mutex_destroy(&queue_lock);
@@ -105,37 +83,24 @@ int main(int argc, char **argv)
     return 0;
 }
 
-int getServerSocket(const int &port)
-{
-    /* 	Creates a TCP socket and binds socket to specified
-        port.
-        Returns configured socket file descriptor.
-     */
-
-    // TCP socket Creation and Configuration
-
-    // Server socket file descriptor
+int getServerSocket(const int &port) {
+    // Create TCP socket and bind
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (server_fd < 0)
-    {
+    if (server_fd < 0) {
         cerr << "Error: Couldn't open socket" << endl;
         return -1;
     }
 
-    // Structure to store configuration details
     struct sockaddr_in server_addr;
     socklen_t saddr_len = sizeof(server_addr);
 
     memset(&server_addr, 0, saddr_len);
-
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port);
 
-    // Bind the socket to the address and port number
-    if (bind(server_fd, (struct sockaddr *)&server_addr, saddr_len) < 0)
-    {
+    if (bind(server_fd, (struct sockaddr *)&server_addr, saddr_len) < 0) {
         cerr << "Error: Couldn't bind socket" << endl;
         close(server_fd);
         return -1;
@@ -145,97 +110,99 @@ int getServerSocket(const int &port)
 }
 
 void addToQueue(int client_fd) {
-    /* 	Add client_fd to clients queue */
-
-    // Acquire lock before pushing client descriptor onto queue
     pthread_mutex_lock(&queue_lock);
     clients.push(client_fd);
     pthread_mutex_unlock(&queue_lock);
-
-    // Unblock one thread that is blocked on the condition variable
     pthread_cond_signal(&queue_not_empty);
 }
 
 void* startRoutine(void *) {
-    /* 	Start routine for worker threads.
-        Pops client_fd from queue and calls client handler function.
-    */
-
-    // Detach current thread from calling thread
     pthread_detach(pthread_self());
 
-    cout << "Thread ID: " << pthread_self() << " -> Listening to queue." << endl;
-    
-    while(true) {
+    while (true) {
         int client_fd = -1;
-
-        // Acquire queue_lock before accessing clients queue
         pthread_mutex_lock(&queue_lock);
-
-        // Wait until clients queue is not empty
         while (clients.empty()) {
-            // cout << "Thread ID: " << pthread_self() << " -> blocked." << endl;
             pthread_cond_wait(&queue_not_empty, &queue_lock);
         }
-
-        // cout << "Thread ID: " << pthread_self() << " -> unblocked." << endl;
-
         client_fd = clients.front();
         clients.pop();
-
-        // Release lock
         pthread_mutex_unlock(&queue_lock);
 
-
-        // Check if client_fd is valid before handling the connection
         if (client_fd != -1) {
-            // Call handler function for popped client
             handleConnection(client_fd);
         }
     }
-
     pthread_exit(NULL);
 }
 
-void handleConnection(int client_fd)
-{
-    /* 	Handle Individual client connections and process
-        and respond to messages sent by the client.
-    */
-
-    // Buffer to read in messages from client
+void handleConnection(int client_fd) {
     char buffer[1024];
     bool end = false;
-    string response;
-    string key, value;
+    string response, key, value;
 
-    // cout << client_fd << " pulled from queue by " << pthread_self() << endl;
-
-    // Until client sends END message
-    while (!end)
-    {
+    while (!end) {
         memset(buffer, 0, sizeof(buffer));
         int bytesReceived = recv(client_fd, buffer, sizeof(buffer), 0);
-        if (bytesReceived < 0)
-        {
+        if (bytesReceived < 0) {
             cerr << "Error: Couldn't receive message" << endl;
             exit(1);
         }
-        else if (bytesReceived == 0)
-        {
+        else if (bytesReceived == 0) {
             cout << "Client disconnected." << endl;
             break;
         }
-        else
-        {
+        else {
             string query;
             stringstream strm(buffer);
-            while (getline(strm, query))
-            {
-                // Process client query
-                // ...
+            while (getline(strm, query)) {
+                if (query == "READ") {
+                    getline(strm, key);
+                    pthread_mutex_lock(&map_lock);
+                    if (KV_DATASTORE.find(key) != KV_DATASTORE.end()) {
+                        response = KV_DATASTORE[key] + "\n";
+                    }
+                    else {
+                        response = "NULL\n";
+                    }
+                    pthread_mutex_unlock(&map_lock);
+                }
+                else if (query == "WRITE") {
+                    getline(strm, key);
+                    getline(strm, value);
+                    value = value.substr(1);
+                    pthread_mutex_lock(&map_lock);
+                    KV_DATASTORE[key] = value;
+                    response = "FIN\n";
+                    pthread_mutex_unlock(&map_lock);
+                }
+                else if (query == "COUNT") {
+                    pthread_mutex_lock(&map_lock);
+                    response = to_string(KV_DATASTORE.size()) + "\n";
+                    pthread_mutex_unlock(&map_lock);
+                }
+                else if (query == "DELETE") {
+                    getline(strm, key);
+                    pthread_mutex_lock(&map_lock);
+                    if (KV_DATASTORE.find(key) != KV_DATASTORE.end()) {
+                        KV_DATASTORE.erase(key);
+                        response = "FIN\n";
+                    }
+                    else {
+                        response = "NULL\n";
+                    }
+                    pthread_mutex_unlock(&map_lock);
+                }
+                else if (query == "END") {
+                    end = true;
+                    break;
+                }
+                send(client_fd, response.c_str(), response.length(), 0);
+                response.clear();
+                key.clear();
+                value.clear();
             }
         }
     }
-    int res = close(client_fd);
+    close(client_fd);
 }
