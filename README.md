@@ -1,3 +1,6 @@
+#### Name: Pradeep J
+#### SRN: PES1UG21EC183
+
 # Multithreaded TCP Server 
 
 HP Assignement: PThreads
@@ -5,9 +8,6 @@ HP Assignement: PThreads
 Build a multi-threaded server in C++, make use of PThreads for parallel programming.
 
 Get started by forking this repo!
-
-### Name: Pradeep J
-### SRN: PES1UG21EC183
 
 ## Requirements
  - g++
